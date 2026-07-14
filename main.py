@@ -7,23 +7,25 @@ import faulthandler
 import traceback
 import threading
 faulthandler.enable()  # 當機除錯
+import time
+
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QListWidget, QLineEdit,
-    QTextEdit, QPushButton, QComboBox,
+    QTextEdit, QTextBrowser, QPushButton, QComboBox,
     QHBoxLayout, QVBoxLayout, QLayout, QSizePolicy,
     QLabel, QGroupBox, QGridLayout, QFrame, QScrollArea,
     QListWidgetItem, QCheckBox, QInputDialog, QMessageBox,
     QListView, QStyledItemDelegate, QStackedWidget, QStyle,
-    QDialog
+    QDialog, QToolTip, QAbstractItemView
 )
 from PySide6.QtCore import (
     Qt, QSize, QTimer, QRect, QPoint,
-    QModelIndex, QAbstractListModel
+    QModelIndex, QAbstractListModel, QObject, Signal, QEvent
 )
 from PySide6.QtGui import (
     QFont, QPixmap, QIcon, QColor, QPainter, QPen, QBrush,
-    QPixmapCache
+    QPixmapCache, QCursor
 )
 
 # ========================= 常數設定 =========================
@@ -47,11 +49,13 @@ RACE_MAP = {
 }
 
 TYPE_CHINESE = {
-    0x1: "怪獸",0x10: "通常",0x20: "效果",0x80: "儀式",0x40: "融合",
+    0x1: "怪獸",0x10: "通常",0x20: "效果",0x40: "融合",
     0x2000: "同步",0x800000: "超量",0x1000000: "靈擺",0x4000000: "連結",0x200: "靈魂",
     0x400: "聯合",0x800: "二重",0x1000: "協調",0x4000: "衍生物",0x200000: "反轉",
     0x400000: "卡通",0x2000000: "特殊召喚",0x2: "魔法",0x10000: "速攻",0x40000: "裝備",
-    0x80000: "場地",0x4: "陷阱",0x100000: "反擊",0x1000000000000000: "永續魔法",0x2000000000000000: "永續陷阱",
+    0x80000: "場地",0x4: "陷阱",0x100000: "反擊",
+    0x1000000000000000: "永續魔法",0x2000000000000000: "永續陷阱",
+    0x4000000000000000: "儀式怪獸",0x8000000000000000: "儀式魔法",
 }
 
 LINK_MARKERS = {(0, 0): 0o1, (1, 0): 0o2, (2, 0): 0o4, (0, 1): 0o10,(2, 1): 0o40, (0, 2): 0o100, (1, 2): 0o200, (2, 2): 0o400}
@@ -146,8 +150,169 @@ class LFLIST:
     def get_labels(self):
         return self.labels
 
+
+# Lua 索引快取管理器
+class LuaCacheManager:
+    def __init__(self):
+        self.script_dir = os.path.join(os.path.dirname(__file__), "script")
+        self.cache_path = os.path.join(os.path.dirname(__file__), "lua_cache_v2.json")
+        self.card_data = {}
+        self.last_updated = 0.0
+        self.inverted_index = {}
+        self.is_loaded = False
+        self._lock = threading.Lock()
+
+    def load_or_build(self, all_cids, progress_callback=None, finished_callback=None):
+        self.is_loaded = False
+        
+        def _thread_worker():
+            # 1. 嘗試讀取舊有的 JSON 快取
+            self._load_cache()
+            
+            # 2. 與資料夾中的實際 lua 檔案進行增量比對和更新
+            self._update_cache(all_cids, progress_callback)
+            
+            # 3. 建立記憶體中的反向索引
+            self._build_inverted_index()
+            
+            self.is_loaded = True
+            if finished_callback:
+                QTimer.singleShot(0, finished_callback)
+
+        t = threading.Thread(target=_thread_worker, daemon=True, name="lua-cache-worker")
+        t.start()
+
+    def _load_cache(self):
+        if os.path.exists(self.cache_path):
+            try:
+                with open(self.cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    with self._lock:
+                        self.card_data = data.get("card_data", {})
+                        self.last_updated = data.get("last_updated", 0.0)
+            except Exception as e:
+                print(f"載入 Lua 快取 JSON 失敗: {e}")
+                with self._lock:
+                    self.card_data = {}
+                    self.last_updated = 0.0
+
+    def _update_cache(self, all_cids, progress_callback):
+        if not os.path.exists(self.script_dir):
+            return
+
+        # 掃描 script 目錄，整理出所有實際存在的 c*.lua 檔案及其修改時間
+        try:
+            files = os.listdir(self.script_dir)
+        except Exception:
+            return
+
+        lua_files = {}  # cid -> (filename, mtime)
+        for f in files:
+            if f.startswith("c") and f.endswith(".lua"):
+                try:
+                    cid = int(f[1:-4])
+                    path = os.path.join(self.script_dir, f)
+                    mtime = os.path.getmtime(path)
+                    lua_files[cid] = (f, mtime)
+                except Exception:
+                    continue
+
+        updated = False
+        to_parse = []
+
+        # 找出哪些 cid 需要重新解析 (不在快取中，或者 lua 檔案有更新)
+        all_cids_set = set(all_cids)
+        with self._lock:
+            # 刪除在快取中但資料庫已不存在的 card_data
+            for cid_str in list(self.card_data.keys()):
+                try:
+                    cid = int(cid_str)
+                except ValueError:
+                    cid = None
+                if cid is None or cid not in all_cids_set:
+                    del self.card_data[cid_str]
+                    updated = True
+
+            for cid in all_cids:
+                cid_str = str(cid)
+                if cid not in lua_files:
+                    if cid_str in self.card_data:
+                        del self.card_data[cid_str]
+                        updated = True
+                    continue
+
+                f_name, mtime = lua_files[cid]
+                # 如果快取中沒有，或者檔案最後修改時間比快取更新時間新，就重新解析
+                if cid_str not in self.card_data or mtime > self.last_updated:
+                    to_parse.append((cid, os.path.join(self.script_dir, f_name)))
+
+        if to_parse:
+            updated = True
+            total = len(to_parse)
+            const_pat = re.compile(r'\b[A-Z_]{3,30}\b')
+
+            def parse_one(item):
+                cid, path = item
+                try:
+                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    consts = set(const_pat.findall(content))
+                    if "aux.EnableChangeCode" in content:
+                        consts.add("🔁 可改變卡片名稱")
+                    if "aux.AddContactFusionProcedure" in content or "Contact_Fusion" in content or "ContactFusion" in content:
+                        consts.add("🌀 接觸融合素材")
+                    if "Duel.Win" in content:
+                        consts.add("🏆 特殊勝利條件")
+                    return cid, list(consts)
+                except Exception:
+                    return cid, []
+
+            from concurrent.futures import ThreadPoolExecutor
+            max_workers = min(32, (os.cpu_count() or 4) * 4)
+            results = []
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(parse_one, item) for item in to_parse]
+                for idx, future in enumerate(futures):
+                    if progress_callback and idx % 200 == 0:
+                        pct = int((idx / total) * 100)
+                        QTimer.singleShot(0, lambda p=pct: progress_callback(p))
+                    results.append(future.result())
+
+            with self._lock:
+                for cid, consts in results:
+                    self.card_data[str(cid)] = consts
+
+        if updated:
+            import time
+            self.last_updated = time.time()
+            try:
+                with open(self.cache_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "version": 1,
+                        "last_updated": self.last_updated,
+                        "card_data": self.card_data
+                    }, f, ensure_ascii=False)
+            except Exception as e:
+                print(f"儲存 Lua 快取 JSON 失敗: {e}")
+
+    def _build_inverted_index(self):
+        temp_index = {}
+        with self._lock:
+            for cid_str, terms in self.card_data.items():
+                try:
+                    cid = int(cid_str)
+                except ValueError:
+                    continue
+                for term in terms:
+                    temp_index.setdefault(term, set()).add(cid)
+        self.inverted_index = temp_index
+
+    def get_matching_cids(self, term):
+        return self.inverted_index.get(term, set())
+
 # 收藏夾
 class FavoritesManager:
+
     def __init__(self):
         self._path = os.path.join(os.path.dirname(__file__), "favorites.json")
         self._data = {}
@@ -224,6 +389,8 @@ QWidget { background-color: #1e1e24; color: #e0e0e6; font-family: "Microsoft Jhe
 QGroupBox { border: 1px solid #3a3a42; border-radius: 6px; margin-top: 10px; font-weight: bold; color: #00d2ff; }
 QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 3px; }
 QLineEdit, QComboBox, QCheckBox { background-color: #2a2a35; border: 1px solid #4a4a5a; border-radius: 4px; padding: 4px; color: white; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 20px; border-left: none; background: transparent; }
+QComboBox::down-arrow { image: url("down_arrow.png"); width: 12px; height: 12px; margin-right: 8px; }
 QCheckBox { spacing: 5px; }
 QListWidget, QListView { background-color: #2a2a35; border: 1px solid #4a4a5a; border-radius: 6px; outline: 0; }
 QListWidget::item, QListView::item { border: none; padding: 5px; border-bottom: 1px solid #333340; }
@@ -238,8 +405,11 @@ QPushButton#clear_all_btn { background-color: #e81123; font-weight: bold; color:
 QPushButton#clear_all_btn:hover { background-color: #ff3344; }
 QPushButton#link_btn { background-color: #2d2d3a; border: 1px solid #4a4a5a; min-width: 25px; min-height: 25px; }
 QPushButton#link_btn:checked { background-color: #004d7a; }
-QPushButton#fav_btn { background-color: #2d2d3a; border: 1px solid #888; min-width: 60px; }
+QPushButton:disabled { background-color: #1e1e24; color: #55555d; border: 1px solid #33333d; }
+QPushButton#fav_btn { background-color: #2d2d3a; border: 1px solid #888; min-width: 90px; }
 QPushButton#fav_btn:checked { background-color: #ffaa00; color: #000; }
+QPushButton#wiki_btn, QPushButton#qa_btn, QPushButton#detail_btn { background-color: #2d2d3a; border: 1px solid #888; min-width: 90px; }
+QPushButton#wiki_btn:hover, QPushButton#qa_btn:hover, QPushButton#detail_btn:hover { background-color: #3d3d4a; }
 QPushButton#folder_btn { background-color: #2d2d3a; border: 1px solid #666; min-width: 24px; max-width: 24px; }
 QPushButton#folder_btn:hover { background-color: #4a4a5a; }
 QScrollBar:vertical { background-color: #141419; width: 10px; margin: 0; border: none; }
@@ -641,6 +811,40 @@ class DetailCardDelegate(QStyledItemDelegate):
         self._pixmap_cache[cid] = pixmap
         return pixmap
 
+# ========================= YGOPRODeck 詳細數據對話框 =========================
+class CardDetailDialog(QDialog):
+    def __init__(self, parent_viewer, card_info):
+        super().__init__(parent_viewer)
+        self.setWindowTitle(f"卡片詳細數據 - {card_info.get('name', '')}")
+        self.resize(600, 500)
+        self._build_ui(card_info)
+
+    def _build_ui(self, card_info):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        lbl_tip = QLabel("YGOPRODeck API 原始數據:")
+        lbl_tip.setStyleSheet("font-weight: bold; color: #00d2ff;")
+        layout.addWidget(lbl_tip)
+
+        browser = QTextBrowser(self)
+        browser.setFont(QFont("Consolas", 10) if sys.platform == "win32" else QFont("Monospace", 10))
+        browser.setStyleSheet("background-color: #141419; border: 1px solid #3a3a42; border-radius: 6px; padding: 8px;")
+        
+        formatted_json = json.dumps(card_info, indent=4, ensure_ascii=False)
+        browser.setPlainText(formatted_json)
+        layout.addWidget(browser)
+
+        btn_close = QPushButton("關閉")
+        btn_close.clicked.connect(self.close)
+        btn_close.setFixedWidth(80)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
 # ========================= Lua 常數對話框（優化排版） =========================
 class ConstantDialog(QDialog):
     def __init__(self, parent_viewer):
@@ -779,13 +983,65 @@ class ConstantDialog(QDialog):
         self.viewer.constant_buttons_state.clear()
         self._apply_timer.start()
 
+# ========================= 滾動速度限制器 =========================
+class SlowScrollFilter(QObject):
+    def __init__(self, view, speed_ratio=0.06):
+        super().__init__(view)
+        self.view = view
+        self.speed_ratio = speed_ratio
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel:
+            scrollbar = self.view.verticalScrollBar()
+            if scrollbar and scrollbar.isVisible():
+                delta = event.angleDelta().y()
+                current = scrollbar.value()
+                
+                # 強制開啟像素滾動以獲得極細緻的緩速效果
+                if self.view.verticalScrollMode() != QAbstractItemView.ScrollPerPixel:
+                    self.view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+                
+                # 像素滾動：大幅縮減每次滾動的像素數 (預設約 6%)
+                step = int(delta * self.speed_ratio)
+                scrollbar.setValue(current - step)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+# ========================= YGOPRODeck 訊號傳遞器 =========================
+class YGOPRODeckDownloader(QObject):
+    fetched = Signal(int, dict)
+    failed = Signal(int)
+
 # ========================= 主程式 =========================
 class Viewer(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("查卡")
         self.resize(1280, 760)
-        self.setStyleSheet(DARK_STYLE)
+        self.setMinimumSize(1045, 610)
+
+        # 生成扁平下拉箭頭圖示
+        arrow_path = os.path.join(os.path.dirname(__file__), "down_arrow.png")
+        if not os.path.exists(arrow_path):
+            try:
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(Qt.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.Antialiasing)
+                pen = QPen(QColor("#e0e0e6"), 2)
+                pen.setCapStyle(Qt.RoundCap)
+                pen.setJoinStyle(Qt.RoundJoin)
+                painter.setPen(pen)
+                painter.drawLine(4, 6, 8, 10)
+                painter.drawLine(8, 10, 12, 6)
+                painter.end()
+                pixmap.save(arrow_path)
+            except Exception as e:
+                print(f"生成下拉箭頭圖示失敗: {e}")
+
+        arrow_url = arrow_path.replace("\\", "/")
+        self.setStyleSheet(DARK_STYLE.replace("down_arrow.png", arrow_url))
 
         self.resize_timer = QTimer()
         self.resize_timer.setSingleShot(True)
@@ -803,6 +1059,12 @@ class Viewer(QWidget):
         self.id_map = {}
         self.lua_feature_cache = {}
         self.lua_file_cache = {}
+        self.lua_cache_mgr = LuaCacheManager()
+        self.ygoprodeck_cache = {}
+        self.downloader = YGOPRODeckDownloader()
+        self.downloader.fetched.connect(self.on_ygoprodeck_fetched)
+        self.downloader.failed.connect(self.on_ygoprodeck_failed)
+
 
         self.attribute_buttons = {}
         self.race_buttons = {}
@@ -821,6 +1083,7 @@ class Viewer(QWidget):
         self._current_cid = None
         self._filter_pending = False
         self._filter_running = False
+        self._filter_cancel_token = object()  # 取消 token，每次新篩選都換一個
 
         self.detail_model = DetailCardModel()
         self.detail_delegate = DetailCardDelegate()
@@ -837,6 +1100,37 @@ class Viewer(QWidget):
         self._init_ui()
         self.combo_display_mode.setCurrentIndex(0)
         self.auto_load_default_db()
+        self.set_dark_title_bar()
+
+    def set_dark_title_bar(self):
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                
+                # 1. 啟用深色模式 (DWMWA_USE_IMMERSIVE_DARK_MODE = 20 / 19)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 20, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int)
+                )
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 19, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int)
+                )
+                
+                # 2. 強制設定標題列背景顏色為極深灰黑色 #0f0f11 (BGR: 0x00110f0f)
+                # DWMWA_CAPTION_COLOR = 35
+                color_bg = ctypes.c_int(0x00110f0f)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 35, ctypes.byref(color_bg), ctypes.sizeof(color_bg)
+                )
+                
+                # 3. 強制設定標題列文字顏色為白色 (BGR: 0x00ffffff)
+                # DWMWA_TEXT_COLOR = 36
+                color_text = ctypes.c_int(0x00ffffff)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 36, ctypes.byref(color_text), ctypes.sizeof(color_text)
+                )
+            except Exception as e:
+                print(f"Set dark title bar failed: {e}")
 
     def _load_constants(self):
         path = os.path.join(os.path.dirname(__file__), "script", "constant.lua")
@@ -886,105 +1180,141 @@ class Viewer(QWidget):
 
         left_panel = QVBoxLayout()
 
-        # ---------- 搜尋列 ----------
+        # ---------- 搜尋列 (最上面單獨一條) ----------
         search_layout = QHBoxLayout()
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(6)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜尋卡片...")
         self.search.setClearButtonEnabled(True)
         self.search.setMinimumHeight(30)
+        search_layout.addWidget(self.search, 1)
+
         self.chk_multi_keyword = QCheckBox("多關鍵字")
         self.chk_multi_keyword.stateChanged.connect(self.apply_filter)
+        search_layout.addWidget(self.chk_multi_keyword)
+
+        # ---------- 統一的篩選網格 ----------
+        filter_grid = QGridLayout()
+        filter_grid.setContentsMargins(0, 0, 0, 0)
+        filter_grid.setVerticalSpacing(4)
+        filter_grid.setHorizontalSpacing(6)
+
+        # Set column stretches:
+        # Col 0 (left labels): width determined by widgets
+        # Col 1 (left comboboxes): stretches to fill available space
+        # Col 2 (right labels): width determined by widgets
+        # Col 3 (right comboboxes): stretches to fill available space (equal to Col 1)
+        filter_grid.setColumnStretch(0, 0)
+        filter_grid.setColumnStretch(1, 1)
+        filter_grid.setColumnStretch(2, 0)
+        filter_grid.setColumnStretch(3, 1)
+
+        # ==================== Row 0 ====================
+        filter_grid.addWidget(QLabel("模式:"), 0, 0, Qt.AlignRight | Qt.AlignVCenter)
+
         self.combo_keyword_mode = QComboBox()
         self.combo_keyword_mode.addItems(["AND", "OR"])
         self.combo_keyword_mode.currentIndexChanged.connect(self.apply_filter)
-        search_layout.addWidget(self.search, 1)
-        search_layout.addWidget(self.chk_multi_keyword)
-        search_layout.addWidget(QLabel("模式:"))
-        search_layout.addWidget(self.combo_keyword_mode)
+        self.combo_keyword_mode.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_keyword_mode, 0, 1)
 
+        filter_grid.addWidget(QLabel("範圍:"), 0, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_search_scope = QComboBox()
         self.combo_search_scope.addItems(["卡名+效果", "僅卡名"])
         self.combo_search_scope.currentIndexChanged.connect(self.apply_filter)
-        search_layout.addWidget(QLabel("範圍:"))
-        search_layout.addWidget(self.combo_search_scope)
+        self.combo_search_scope.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_search_scope, 0, 3)
 
-        # ---------- 篩選設定網格 ----------
-        filter_grid = QGridLayout()
-        filter_grid.setVerticalSpacing(5)
-        filter_grid.setHorizontalSpacing(5)
-
-        filter_grid.addWidget(QLabel("排序:"), 0, 0)
+        # ==================== Row 1 ====================
+        filter_grid.addWidget(QLabel("排序:"), 1, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_sort = QComboBox()
         self.combo_sort.addItems(["ID (升)", "ID (降)", "名稱 (升)", "名稱 (降)", "ATK (升)", "ATK (降)", "DEF (升)", "DEF (降)", "等級 (升)", "等級 (降)"])
         self.combo_sort.currentIndexChanged.connect(self.apply_filter)
-        filter_grid.addWidget(self.combo_sort, 0, 1)
+        self.combo_sort.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_sort, 1, 1)
 
-        filter_grid.addWidget(QLabel("環境:"), 0, 2)
+        filter_grid.addWidget(QLabel("環境:"), 1, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_env = QComboBox()
         self.combo_env.addItems(["全部環境", "含有 OCG", "含有 TCG", "僅限 OCG", "僅限 TCG"])
         self.combo_env.currentIndexChanged.connect(self.apply_filter)
-        filter_grid.addWidget(self.combo_env, 0, 3)
+        self.combo_env.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_env, 1, 3)
 
-        filter_grid.addWidget(QLabel("禁卡表:"), 1, 0)
+        # ==================== Row 2 ====================
+        filter_grid.addWidget(QLabel("禁卡表:"), 2, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_lflist = QComboBox()
-        self.combo_lflist.addItem("無禁限")
+        self.combo_lflist.addItem("無限制")
         for label in self.lflist.get_labels():
             self.combo_lflist.addItem(label)
         self.combo_lflist.currentIndexChanged.connect(self.on_lflist_changed)
-        filter_grid.addWidget(self.combo_lflist, 1, 1)
+        self.combo_lflist.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_lflist, 2, 1)
 
-        filter_grid.addWidget(QLabel("狀態:"), 1, 2)
+        filter_grid.addWidget(QLabel("狀態:"), 2, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_limit_filter = QComboBox()
         self.combo_limit_filter.addItems(["全部", "禁止", "限制", "準限制"])
         self.combo_limit_filter.currentIndexChanged.connect(self.on_limit_filter_changed)
-        filter_grid.addWidget(self.combo_limit_filter, 1, 3)
+        self.combo_limit_filter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_limit_filter, 2, 3)
 
-        folder_layout = QHBoxLayout()
+        # ==================== Row 3 ====================
+        filter_grid.addWidget(QLabel("收藏夾:"), 3, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_folder = QComboBox()
         self.combo_folder.addItems(self.fav_mgr.get_folders())
         self.combo_folder.currentIndexChanged.connect(self.on_folder_changed)
+        self.combo_folder.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_folder, 3, 1)
+
         self.btn_add_folder = QPushButton("+")
+        self.btn_add_folder.setFixedSize(30, 26)
         self.btn_add_folder.setObjectName("folder_btn")
         self.btn_add_folder.clicked.connect(self.add_folder)
+        
         self.btn_del_folder = QPushButton("✕")
+        self.btn_del_folder.setFixedSize(30, 26)
         self.btn_del_folder.setObjectName("folder_btn")
         self.btn_del_folder.clicked.connect(self.del_folder)
-        folder_layout.addWidget(QLabel("收藏夾:"))
-        folder_layout.addWidget(self.combo_folder, 1)
-        folder_layout.addWidget(self.btn_add_folder)
-        folder_layout.addWidget(self.btn_del_folder)
-        filter_grid.addLayout(folder_layout, 2, 0, 1, 4)
 
-        # ---------- 顯示選項 ----------
-        option_layout = QHBoxLayout()
         self.chk_fav_only = QCheckBox("僅顯示收藏")
         self.chk_fav_only.stateChanged.connect(self.apply_filter)
-        option_layout.addWidget(self.chk_fav_only)
+        self.chk_fav_only.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
-        option_layout.addWidget(QLabel("顯示模式:"))
+        fav_right_layout = QHBoxLayout()
+        fav_right_layout.setContentsMargins(0, 0, 0, 0)
+        fav_right_layout.setSpacing(4)
+        fav_right_layout.addWidget(self.btn_add_folder)
+        fav_right_layout.addWidget(self.btn_del_folder)
+        fav_right_layout.addWidget(self.chk_fav_only, 1)
+        filter_grid.addLayout(fav_right_layout, 3, 3)
+
+        # ==================== Row 4 ====================
+        filter_grid.addWidget(QLabel("顯示:"), 4, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_display_mode = QComboBox()
         self.combo_display_mode.addItems(["縮圖模式", "詳細模式"])
         self.combo_display_mode.currentIndexChanged.connect(self.on_display_mode_changed)
-        option_layout.addWidget(self.combo_display_mode)
+        self.combo_display_mode.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_display_mode, 4, 1)
 
-        option_layout.addWidget(QLabel("每行張數:"))
+        self.lbl_columns = QLabel("每行:")
+        filter_grid.addWidget(self.lbl_columns, 4, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_columns = QComboBox()
         self.combo_columns.addItems(["1", "2", "3", "4", "5", "6", "8", "10"])
         self.combo_columns.setCurrentText("4")
         self.combo_columns.currentIndexChanged.connect(self.on_columns_changed)
-        option_layout.addWidget(self.combo_columns)
-        option_layout.addStretch()
+        self.combo_columns.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        filter_grid.addWidget(self.combo_columns, 4, 3)
 
         left_panel.addLayout(search_layout)
         left_panel.addLayout(filter_grid)
-        left_panel.addLayout(option_layout)
 
-        self.lbl_count = QLabel("全庫：0 筆")
+        self.lbl_count = QLabel("全庫 : 0 筆")
 
         self.stack = QStackedWidget()
         self.list = QListWidget()
         self.list.setViewMode(QListWidget.IconMode)
         self.list.setSpacing(8)
+        self.list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.list.setWordWrap(False)
         self.list.setTextElideMode(Qt.ElideRight)
         self.list.setUniformItemSizes(True)
@@ -1001,6 +1331,13 @@ class Viewer(QWidget):
         self.detail_view.setVerticalScrollMode(QListView.ScrollPerPixel)
         self.detail_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.detail_view.setSpacing(0)
+
+        # 限制左側縮圖與詳細清單滾動速度，使滑動極其緩慢精準
+        self.list_scroll_filter = SlowScrollFilter(self.list, speed_ratio=0.06)
+        self.list.installEventFilter(self.list_scroll_filter)
+
+        self.detail_scroll_filter = SlowScrollFilter(self.detail_view, speed_ratio=0.06)
+        self.detail_view.installEventFilter(self.detail_scroll_filter)
 
         self.stack.addWidget(self.list)
         self.stack.addWidget(self.detail_view)
@@ -1023,9 +1360,12 @@ class Viewer(QWidget):
 
         # 右側資訊面板
         right_panel = QVBoxLayout()
-        self.info = QTextEdit()
+        self.info = QTextBrowser()
         self.info.setReadOnly(True)
         self.info.setFont(QFont("Microsoft JhengHei", 11))
+        self.info.setOpenLinks(False)
+        self.info.setFocusPolicy(Qt.NoFocus)
+        self.info.anchorClicked.connect(self.handle_info_link)
 
         self.lbl_image = QLabel("無圖片")
         self.lbl_image.setAlignment(Qt.AlignCenter)
@@ -1039,12 +1379,39 @@ class Viewer(QWidget):
         self.btn_fav.setCheckable(True)
         self.btn_fav.clicked.connect(self.toggle_favorite)
 
-        img_layout = QVBoxLayout()
-        img_layout.addWidget(self.lbl_image, alignment=Qt.AlignCenter)
-        img_layout.addWidget(self.btn_fav, alignment=Qt.AlignCenter)
+        self.btn_wiki = QPushButton("Yugipedia")
+        self.btn_wiki.setObjectName("wiki_btn")
+        self.btn_wiki.clicked.connect(self.open_wiki)
 
+        self.btn_qa = QPushButton("Q&A")
+        self.btn_qa.setObjectName("qa_btn")
+        self.btn_qa.setEnabled(False)
+        self.btn_qa.clicked.connect(self.open_qa)
+
+        self.btn_detail = QPushButton("詳細數據")
+        self.btn_detail.setObjectName("detail_btn")
+        self.btn_detail.setEnabled(False)
+        self.btn_detail.clicked.connect(self.show_ygoprodeck_detail)
+
+        btn_layout = QVBoxLayout()
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(10)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_fav, alignment=Qt.AlignCenter)
+        btn_layout.addWidget(self.btn_wiki, alignment=Qt.AlignCenter)
+        btn_layout.addWidget(self.btn_qa, alignment=Qt.AlignCenter)
+        btn_layout.addWidget(self.btn_detail, alignment=Qt.AlignCenter)
+        btn_layout.addStretch()
+
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(15)
+        bottom_layout.addWidget(self.lbl_image, alignment=Qt.AlignLeft)
+        bottom_layout.addLayout(btn_layout)
+
+        right_panel.setSpacing(15)
         right_panel.addWidget(self.info)
-        right_panel.addLayout(img_layout)
+        right_panel.addLayout(bottom_layout)
 
         main_layout.addLayout(left_panel, 4)
         main_layout.addWidget(scroll, 4)
@@ -1331,18 +1698,25 @@ class Viewer(QWidget):
             for c in range(3):
                 if r == 1 and c == 1:
                     lbl = QLabel("")
+                    lbl.setFixedSize(36, 36)
                     link_grid.addWidget(lbl, r, c, alignment=Qt.AlignCenter)
                 else:
                     btn = QPushButton("")
                     btn.setObjectName("link_btn")
                     btn.setCheckable(True)
+                    btn.setFixedSize(36, 36)
                     btn.clicked.connect(self.apply_filter)
                     arrow_symbols = {(0,0):"↙", (1,0):"↓", (2,0):"↘", (0,1):"←", (2,1):"→", (0,2):"↖", (1,2):"↑", (2,2):"↗"}
                     btn.setText(arrow_symbols[(r,c)])
                     mask = LINK_MARKERS[(r,c)]
                     self.link_buttons[mask] = btn
                     link_grid.addWidget(btn, 2 - c, r)
-        link_lay.addLayout(link_grid)
+        
+        link_container = QHBoxLayout()
+        link_container.addStretch()
+        link_container.addLayout(link_grid)
+        link_container.addStretch()
+        link_lay.addLayout(link_container)
         link_box.setLayout(link_lay)
         panel.addWidget(link_box)
 
@@ -1430,46 +1804,26 @@ class Viewer(QWidget):
             self.lua_feature_cache.clear()
             self.lua_file_cache.clear()
             self.apply_filter()
-            self._start_lua_warmup()  # 背景預熱 lua 快取
+            # 啟動 Lua 檢索快取建置/載入
+            cids = [c[0] for c in self.cards]
+            self.lbl_count.setText("正在建立/載入 Lua 檢索快取...")
+            self.lua_cache_mgr.load_or_build(
+                cids,
+                progress_callback=self._on_lua_cache_progress,
+                finished_callback=self._on_lua_cache_finished
+            )
         except Exception as e:
             print(f"載入 CDB 失敗: {e}")
 
-    def _start_lua_warmup(self):
-        """在背景執行緒中預先讀取所有 lua 檔案到快取，避免第一次選常數時卡頓"""
-        if hasattr(self, '_warmup_thread') and self._warmup_thread.is_alive():
-            return  # 上一個還在跑，不重複啟動
+    def _on_lua_cache_progress(self, pct):
+        self.lbl_count.setText(f"正在建立/載入 Lua 檢索快取... {pct}%")
 
-        cards_snapshot = list(self.cards)   # 拷貝一份，避免跨執行緒變動
-        cache = self.lua_file_cache
-        script_dir = os.path.join(os.path.dirname(__file__), "script")
-
-        def _warmup():
-            for c in cards_snapshot:
-                cid = c[0]
-                if cid in cache:
-                    continue  # 已在快取，跳過
-                path = os.path.join(script_dir, f"c{cid}.lua")
-                if os.path.exists(path):
-                    try:
-                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                            cache[cid] = f.read()
-                    except Exception:
-                        cache[cid] = ""
-                else:
-                    cache[cid] = ""
-            # 完成後通知主執行緒（QTimer.singleShot 是 thread-safe 的）
-            QTimer.singleShot(0, self._on_lua_warmup_done)
-
-        self._warmup_thread = threading.Thread(
-            target=_warmup, daemon=True, name="lua-warmup"
-        )
-        self._warmup_thread.start()
-
-    def _on_lua_warmup_done(self):
-        """背景預熱完成後更新狀態列"""
+    def _on_lua_cache_finished(self):
+        self.apply_filter()
         txt = self.lbl_count.text()
         if not txt.endswith("Lua 索引完成"):
             self.lbl_count.setText(txt + "  ✅ Lua 索引完成")
+
 
 
 
@@ -1622,6 +1976,140 @@ class Viewer(QWidget):
         if self.chk_fav_only.isChecked():
             self.apply_filter()
 
+    def handle_info_link(self, url):
+        link = url.toString()
+        if not self._current_cid:
+            return
+        card = self.id_map.get(self._current_cid)
+        if not card:
+            return
+        cid, name, desc, ctype, atk, df, level, race, attr, setcode, alias, ot, category = card
+
+        clipboard = QApplication.clipboard()
+        if link == "copy:name":
+            clipboard.setText(name)
+            QToolTip.showText(QCursor.pos(), "已複製卡名")
+        elif link == "copy:code":
+            clipboard.setText(str(cid).zfill(8))
+            QToolTip.showText(QCursor.pos(), "已複製卡片密碼")
+        elif link == "copy:desc":
+            clipboard.setText(desc)
+            QToolTip.showText(QCursor.pos(), "已複製卡片效果")
+
+    def open_wiki(self):
+        if self._current_cid is None:
+            return
+        import webbrowser
+        url = f"https://yugipedia.com/wiki/{str(self._current_cid).zfill(8)}"
+        webbrowser.open(url)
+
+    def open_qa(self):
+        if self._current_cid is None:
+            return
+        ygopro_data = self.ygoprodeck_cache.get(self._current_cid)
+        if isinstance(ygopro_data, dict):
+            misc = ygopro_data.get("misc_info", [{}])[0]
+            konami_id = misc.get("konami_id")
+            if konami_id:
+                import webbrowser
+                url = f"https://www.db.yugioh-card.com/yugiohdb/card_search.action?ope=2&cid={konami_id}"
+                webbrowser.open(url)
+
+    def show_ygoprodeck_detail(self):
+        if self._current_cid is None:
+            return
+        ygopro_data = self.ygoprodeck_cache.get(self._current_cid)
+        if isinstance(ygopro_data, dict):
+            dialog = CardDetailDialog(self, ygopro_data)
+            dialog.exec()
+
+    def fetch_ygoprodeck_info(self, cid):
+        def worker():
+            import urllib.request
+            import json
+            import ssl
+            import traceback
+
+            # 建立未驗證的 SSL 上下文，避開 Windows 平台常見的 Python SSL 證書驗證錯誤
+            context = ssl._create_unverified_context()
+            
+            # 第一輪：優先使用原始 ID 查詢
+            url1 = f"https://db.ygoprodeck.com/api/v7/cardinfo.php?id={str(cid)}&misc=yes&format=genesys%20ocg"
+            req1 = urllib.request.Request(
+                url1,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            
+            try:
+                with urllib.request.urlopen(req1, timeout=5, context=context) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    if "data" in data and len(data["data"]) > 0:
+                        card_info = data["data"][0]
+                        self.downloader.fetched.emit(cid, card_info)
+                        return
+            except Exception as e:
+                # 記錄第一輪失敗日誌
+                try:
+                    with open("api_error_log.txt", "a", encoding="utf-8") as log_f:
+                        log_f.write(f"First attempt failed for {cid} (url: {url1}): {e}\n")
+                except:
+                    pass
+
+            # 第二輪：後備方案使用補滿 8 位的 ID 查詢
+            url2 = f"https://db.ygoprodeck.com/api/v7/cardinfo.php?id={str(cid).zfill(8)}&misc=yes&format=genesys%20ocg"
+            req2 = urllib.request.Request(
+                url2,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            
+            try:
+                with urllib.request.urlopen(req2, timeout=5, context=context) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    if "data" in data and len(data["data"]) > 0:
+                        card_info = data["data"][0]
+                        self.downloader.fetched.emit(cid, card_info)
+                        return
+            except Exception as e:
+                # 記錄第二輪失敗日誌
+                try:
+                    with open("api_error_log.txt", "a", encoding="utf-8") as log_f:
+                        log_f.write(f"Second attempt failed for {cid} (url: {url2}): {e}\n" + traceback.format_exc() + "\n")
+                except:
+                    pass
+
+            # 兩輪皆失敗，回報失敗
+            self.downloader.failed.emit(cid)
+
+        import threading
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+    def on_ygoprodeck_fetched(self, cid, card_info):
+        self.ygoprodeck_cache[cid] = card_info
+        if self._current_cid == cid:
+            display_mode = self.combo_display_mode.currentText()
+            if display_mode == "詳細模式":
+                current_idx = self.detail_view.selectionModel().currentIndex()
+                if current_idx.isValid():
+                    self.show_card(current_idx.row())
+            else:
+                row = self.list.currentRow()
+                if row >= 0:
+                    self.show_card(row)
+
+    def on_ygoprodeck_failed(self, cid):
+        self.ygoprodeck_cache[cid] = "failed"
+        if self._current_cid == cid:
+            display_mode = self.combo_display_mode.currentText()
+            if display_mode == "詳細模式":
+                current_idx = self.detail_view.selectionModel().currentIndex()
+                if current_idx.isValid():
+                    self.show_card(current_idx.row())
+            else:
+                row = self.list.currentRow()
+                if row >= 0:
+                    self.show_card(row)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.resize_timer.start(150)
@@ -1668,6 +2156,9 @@ class Viewer(QWidget):
         self.list.setIconSize(QSize(icon_width, icon_height))
 
     def on_display_mode_changed(self, idx):
+        is_thumbnail = (self.combo_display_mode.currentText() == "縮圖模式")
+        self.lbl_columns.setVisible(is_thumbnail)
+        self.combo_columns.setVisible(is_thumbnail)
         self.thumbnail_cache.clear()
         self.update_list_grid()
         self.apply_filter()
@@ -1738,12 +2229,18 @@ class Viewer(QWidget):
 
         SPECIAL_PERM_MAGIC = 0x1000000000000000
         SPECIAL_PERM_TRAP  = 0x2000000000000000
+        SPECIAL_RIT_MONSTER = 0x4000000000000000
+        SPECIAL_RIT_MAGIC   = 0x8000000000000000
         inc_perm_magic = SPECIAL_PERM_MAGIC in active_types_inc
         inc_perm_trap  = SPECIAL_PERM_TRAP  in active_types_inc
-        normal_types_inc = [t for t in active_types_inc if t not in (SPECIAL_PERM_MAGIC, SPECIAL_PERM_TRAP)]
+        inc_rit_monster = SPECIAL_RIT_MONSTER in active_types_inc
+        inc_rit_magic   = SPECIAL_RIT_MAGIC   in active_types_inc
+        normal_types_inc = [t for t in active_types_inc if t not in (SPECIAL_PERM_MAGIC, SPECIAL_PERM_TRAP, SPECIAL_RIT_MONSTER, SPECIAL_RIT_MAGIC)]
         exc_perm_magic = SPECIAL_PERM_MAGIC in active_types_exc
         exc_perm_trap  = SPECIAL_PERM_TRAP  in active_types_exc
-        normal_types_exc = [t for t in active_types_exc if t not in (SPECIAL_PERM_MAGIC, SPECIAL_PERM_TRAP)]
+        exc_rit_monster = SPECIAL_RIT_MONSTER in active_types_exc
+        exc_rit_magic   = SPECIAL_RIT_MAGIC   in active_types_exc
+        normal_types_exc = [t for t in active_types_exc if t not in (SPECIAL_PERM_MAGIC, SPECIAL_PERM_TRAP, SPECIAL_RIT_MONSTER, SPECIAL_RIT_MAGIC)]
 
         self.filtered = []
         self.thumbnail_timer.stop()    # 必須在 list.clear() 之前停，否則可能跑到已刪除的 item
@@ -1829,6 +2326,10 @@ class Viewer(QWidget):
                 continue
             if exc_perm_trap  and (ctype & TYPE_TRAP  and ctype & 0x20000):
                 continue
+            if exc_rit_monster and (ctype & TYPE_MONSTER and ctype & 0x80):
+                continue
+            if exc_rit_magic   and (ctype & TYPE_MAGIC   and ctype & 0x80):
+                continue
 
             link_type_checked = (TYPE_LINK in normal_types_inc)
             other_types_inc = [t for t in normal_types_inc if t != TYPE_LINK]
@@ -1841,140 +2342,120 @@ class Viewer(QWidget):
                     if not any(ctype & t for t in other_types_inc):
                         continue
 
-            if link_type_checked and not bool(ctype & TYPE_LINK):
-                continue
-
-            if inc_perm_magic and not (ctype & TYPE_MAGIC and ctype & 0x20000):
-                continue
-            if inc_perm_trap and not (ctype & TYPE_TRAP and ctype & 0x20000):
-                continue
-
+            if link_type_checked and not bool(ctype & TYPE_LINK): continue
+            if inc_perm_magic and not (ctype & TYPE_MAGIC and ctype & 0x20000): continue
+            if inc_perm_trap and not (ctype & TYPE_TRAP and ctype & 0x20000): continue
+            if inc_rit_monster and not (ctype & TYPE_MONSTER and ctype & 0x80): continue
+            if inc_rit_magic and not (ctype & TYPE_MAGIC and ctype & 0x80): continue
             if active_links:
-                if not (ctype & TYPE_LINK):
-                    continue
+                if not (ctype & TYPE_LINK): continue
                 if link_mode == "AND":
-                    if not all(df & m for m in active_links):
-                        continue
+                    if not all(df & m for m in active_links): continue
                 else:
-                    if not any(df & m for m in active_links):
-                        continue
-
+                    if not any(df & m for m in active_links): continue
             card_archetypes = []
             temp_setcode = setcode if setcode is not None else 0
             for _ in range(4):
                 sub_code = temp_setcode & 0xFFFF
-                if sub_code > 0:
-                    card_archetypes.append(sub_code)
+                if sub_code > 0: card_archetypes.append(sub_code)
                 temp_setcode >>= 16
             if active_setnames:
                 if self.combo_setname_mode.currentText() == "AND":
-                    if not all(s in card_archetypes for s in active_setnames):
-                        continue
+                    if not all(s in card_archetypes for s in active_setnames): continue
                 else:
-                    if not any(s in card_archetypes for s in active_setnames):
-                        continue
-
+                    if not any(s in card_archetypes for s in active_setnames): continue
             if active_categories:
                 if category_mode == "AND":
-                    if not all((category & c) == c for c in active_categories):
-                        continue
+                    if not all((category & c) == c for c in active_categories): continue
                 else:
-                    if not any(category & c for c in active_categories):
-                        continue
-
+                    if not any(category & c for c in active_categories): continue
             card_lv = level & 0xFFFF
-            if active_lvs and card_lv not in active_lvs:
-                continue
+            if active_lvs and card_lv not in active_lvs: continue
             card_scale = (level >> 24) & 0xFF
-            if active_scales and card_scale not in active_scales:
-                continue
-
+            if active_scales and card_scale not in active_scales: continue
             if lf_label and limit_filter != 3:
                 limit = self.lflist.get_limit(cid, lf_label)
-                if limit != limit_filter:
-                    continue
-
-            if fav_only and not self.fav_mgr.contains(folder, cid):
-                continue
-
+                if limit != limit_filter: continue
+            if fav_only and not self.fav_mgr.contains(folder, cid): continue
             candidates.append(c)
 
-        # ── Phase 2：特殊條件 + lua 掃描（可能讀取大量檔案，分批 + processEvents）──
+        # ── Phase 2：需要 lua 篩選時，使用快取集合極速過濾 ──────────────────
         needs_special = bool(active_constant_names or special_conditions_check)
+        display_mode = self.combo_display_mode.currentText()
 
         if needs_special:
-            # 預先編譯 regex，避免在迴圈裡重複 compile
-            const_patterns = [
-                (cn, re.compile(r'(?<![a-zA-Z0-9_])' + re.escape(cn) + r'(?![a-zA-Z0-9_])'))
-                for cn in active_constant_names
-            ]
-            lua_conds = [c for c in special_conditions_check if c != "has_alias"]
-            total = len(candidates)
-            BATCH = 200  # 每 200 張讓 UI 回應一次
+            if not self.lua_cache_mgr.is_loaded:
+                # 快取還沒準備好，先跳過 Lua 篩選，直接顯示，並在狀態列提示
+                self._apply_filter_finalize(candidates, sort_mode, display_mode, default_icon)
+                self.lbl_count.setText(self.lbl_count.text() + " ⏳ (Lua 檢索快取建置中...)")
+                self._filter_running = False
+                if self._filter_pending:
+                    self._filter_pending = False
+                    self.apply_filter()
+                return
 
-            for i, c in enumerate(candidates):
-                cid, name, desc, ctype, atk, df, level, race, attr, setcode, alias, ot, category = c
-                results = []
+            # 快取已準備好，執行極速的 set 集合運算
+            lua_match_set = None
 
-                # has_alias 是 boolean，在 Phase 2 裡一起評估
+            if special_mode == "AND":
+                # 交集模式
                 if "has_alias" in special_conditions_check:
-                    results.append(alias != 0)
+                    alias_cids = {c[0] for c in candidates if c[10] != 0}
+                    lua_match_set = alias_cids
 
-                # lua feature 條件
-                if lua_conds:
-                    feats = self._get_lua_features(cid, name, alias)
-                    for cond in lua_conds:
-                        results.append(cond in feats)
-
-                # lua 常數條件
-                if const_patterns:
-                    lua_content = self._get_lua_file_content(cid)
-                    if not lua_content:
-                        for _ in const_patterns:
-                            results.append(False)
+                for cn in active_constant_names:
+                    cids = self.lua_cache_mgr.get_matching_cids(cn)
+                    if lua_match_set is None:
+                        lua_match_set = cids
                     else:
-                        for cn, pat in const_patterns:
-                            results.append(pat.search(lua_content) is not None)
+                        lua_match_set = lua_match_set.intersection(cids)
 
-                if results:
-                    if special_mode == "AND":
-                        if not all(results):
-                            continue
-                    else:
-                        if not any(results):
-                            continue
+                for cond in special_conditions_check:
+                    if cond != "has_alias":
+                        cids = self.lua_cache_mgr.get_matching_cids(cond)
+                        if lua_match_set is None:
+                            lua_match_set = cids
+                        else:
+                            lua_match_set = lua_match_set.intersection(cids)
 
-                self.filtered.append(c)
+                if lua_match_set is None:
+                    lua_match_set = set()
+            else:
+                # 聯集模式
+                lua_match_set = set()
+                if "has_alias" in special_conditions_check:
+                    alias_cids = {c[0] for c in candidates if c[10] != 0}
+                    lua_match_set.update(alias_cids)
 
-                # 每 BATCH 張讓 Qt 事件迴圈處理一次（保持 UI 回應）
-                if (i + 1) % BATCH == 0:
-                    self.lbl_count.setText(f"掃描 Lua... {i + 1}/{total}")
-                    QApplication.processEvents()
-                    if self._filter_pending:
-                        break  # 有新的篩選請求，提前結束本輪
-        else:
-            self.filtered = candidates
+                for cn in active_constant_names:
+                    lua_match_set.update(self.lua_cache_mgr.get_matching_cids(cn))
 
+                for cond in special_conditions_check:
+                    if cond != "has_alias":
+                        lua_match_set.update(self.lua_cache_mgr.get_matching_cids(cond))
+
+            # 進行過濾
+            candidates = [c for c in candidates if c[0] in lua_match_set]
+
+        # 直接更新 UI
+        self._apply_filter_finalize(candidates, sort_mode, display_mode, default_icon)
+
+
+    def _apply_filter_finalize(self, result, sort_mode, display_mode, default_icon):
+        self.filtered = result
         def sort_key(card):
             cid, name, desc, ctype, atk, df, level, race, attr, setcode, alias, ot, category = card
             field = sort_mode.split(" ")[0]
-            if field == "ID":
-                return cid
-            elif field == "名稱":
-                return name
-            elif field == "ATK":
-                return atk if atk != -2 else -99999
-            elif field == "DEF":
-                return df if df != -2 else -99999
-            elif field == "等級":
-                return level & 0xFFFF
-            else:
-                return cid
+            if field == "ID": return cid
+            elif field == "名稱": return name
+            elif field == "ATK": return atk if atk != -2 else -99999
+            elif field == "DEF": return df if df != -2 else -99999
+            elif field == "等級": return level & 0xFFFF
+            else: return cid
 
-        reverse_sort = "(降)" in sort_mode
+        reverse_sort = "（降）" in sort_mode or "(降)" in sort_mode
         self.filtered.sort(key=sort_key, reverse=reverse_sort)
 
-        display_mode = self.combo_display_mode.currentText()
         if display_mode == "縮圖模式":
             self.stack.setCurrentIndex(0)
             self.list.setViewMode(QListWidget.IconMode)
@@ -1990,7 +2471,7 @@ class Viewer(QWidget):
                 if icon is not None:
                     item.setIcon(icon)
                 else:
-                    item.setIcon(QIcon(default_icon))
+                    item.setIcon(default_icon)
                     self.thumbnail_queue.append((item, cid))
                 self.list.addItem(item)
         else:
@@ -1999,7 +2480,7 @@ class Viewer(QWidget):
             self.detail_model.set_lflist_info(self.lflist, self.current_lf_label)
             self.detail_view.clearSelection()
 
-        self.lbl_count.setText(f"篩選出：{len(self.filtered)} / 全庫：{len(self.cards)} 筆")
+        self.lbl_count.setText(f"篩選出 : {len(self.filtered)} / 全庫 : {len(self.cards)} 筆")
         self._filter_running = False
         if self._filter_pending:
             self._filter_pending = False
@@ -2029,7 +2510,7 @@ class Viewer(QWidget):
                     content = f.read()
                 if "aux.EnableChangeCode" in content:
                     features.append("🔁 可改變卡片名稱")
-                if "aux.AddContactFusionProcedure" in content:
+                if "aux.AddContactFusionProcedure" in content or "Contact_Fusion" in content or "ContactFusion" in content:
                     features.append("🌀 接觸融合素材")
                 if "Duel.Win" in content:
                     features.append("🏆 特殊勝利條件")
@@ -2057,6 +2538,43 @@ class Viewer(QWidget):
         cid, name, desc, ctype, atk, df, level, race, attr, setcode, alias, ot, category = c
         self._current_cid = cid
 
+        # YGOPRODeck API 數據加載邏輯
+        ygopro_data = self.ygoprodeck_cache.get(cid)
+        ygopro_html = ""
+        if isinstance(ygopro_data, dict):
+            misc = ygopro_data.get("misc_info", [{}])[0]
+            ban = ygopro_data.get("banlist_info", {})
+            md_rarity = misc.get("md_rarity", "無")
+            genesys_ocg_points = misc.get("genesys_ocg_points", "無")
+            ban_ocg = ban.get("ban_ocg", "無限制")
+            ban_tcg = ban.get("ban_tcg", "無限制")
+            konami_id = misc.get("konami_id")
+            
+            ygopro_html = f"""
+            <p style="color: #b388ff; margin: 2px 0;">MD 稀有度: {md_rarity} &nbsp;&nbsp;&nbsp;&nbsp; Genesys OCG 點數: {genesys_ocg_points}</p>
+            <p style="color: #b388ff; margin: 2px 0;">OCG: {ban_ocg} &nbsp;&nbsp;&nbsp;&nbsp; TCG: {ban_tcg}</p>
+            """
+            
+            self.btn_detail.setEnabled(True)
+            if konami_id:
+                self.btn_qa.setEnabled(True)
+            else:
+                self.btn_qa.setEnabled(False)
+        elif ygopro_data == "fetching":
+            ygopro_html = """
+            <p style="color: #888888; margin: 2px 0;">⏳ [YGOPRODeck 數據載入中...]</p>
+            """
+            self.btn_qa.setEnabled(False)
+            self.btn_detail.setEnabled(False)
+        else:
+            # Not fetched or failed
+            ygopro_html = ""
+            self.btn_qa.setEnabled(False)
+            self.btn_detail.setEnabled(False)
+            if ygopro_data is None:
+                self.ygoprodeck_cache[cid] = "fetching"
+                self.fetch_ygoprodeck_info(cid)
+
         folder = self.combo_folder.currentText()
         is_fav = self.fav_mgr.contains(folder, cid)
         self.btn_fav.setChecked(is_fav)
@@ -2065,7 +2583,7 @@ class Viewer(QWidget):
         lua_features = self._get_lua_features(cid, name, alias)
         if lua_features:
             features_html = '<div style="margin-top: 6px; margin-bottom: 6px;">' + \
-                            ''.join(f'<p style="color: #ffaa55; margin: 2px 0;">{feat}</p>' for feat in lua_features) + \
+                            ''.join(f'<p style="color: #b388ff; margin: 2px 0;">{feat}</p>' for feat in lua_features) + \
                             '</div>'
         else:
             features_html = ""
@@ -2111,27 +2629,19 @@ class Viewer(QWidget):
             type_parts.append("陷阱")
 
         for t_mask, t_name in TYPE_CHINESE.items():
-            if t_mask in [0x1, 0x2, 0x4]:
+            if t_mask in [0x1, 0x2, 0x4, 0x1000000000000000, 0x2000000000000000, 0x4000000000000000, 0x8000000000000000]:
                 continue
             if ctype & t_mask:
-                if t_mask == 0x20000:
-                    if is_magic:
-                        type_parts.append("永續魔法")
-                    elif is_trap:
-                        type_parts.append("永續陷阱")
-                    else:
-                        type_parts.append("永續")
-                else:
-                    type_parts.append(t_name)
+                type_parts.append(t_name)
+
+        if ctype & 0x20000:  # TYPE_CONTINUOUS
+            type_parts.append("永續")
+
+        if ctype & 0x80:  # TYPE_RITUAL
+            type_parts.append("儀式")
 
         final_types = []
-        has_perm_magic = "永續魔法" in type_parts
-        has_perm_trap = "永續陷阱" in type_parts
         for t in type_parts:
-            if has_perm_magic and t == "魔法":
-                continue
-            if has_perm_trap and t == "陷阱":
-                continue
             if t not in final_types:
                 final_types.append(t)
         type_display = " / ".join(final_types) if final_types else "未知卡種"
@@ -2164,7 +2674,7 @@ class Viewer(QWidget):
                 if category & code:
                     category_names.append(name2)
         category_display = "、".join(category_names) if category_names else "無"
-        category_row = f'<p style="color: #ffaa55; margin: 2px 0;">效果分類: {category_display}</p>'
+        category_row = f'<p style="color: #b388ff; margin: 2px 0;">效果分類: {category_display}</p>'
 
         limit_text = ""
         if self.current_lf_label:
@@ -2228,9 +2738,9 @@ class Viewer(QWidget):
                 else:
                     relate_type = "規則上同名卡（效果/名稱視為原卡）"
                 related_html += f'<p style="color: #88ddff; margin: 4px 0;"><b>關聯類型：</b>{relate_type}</p>'
-                related_html += f'<p style="color: #88ddff; margin: 4px 0;"><b>原卡：</b>ID {orig_id} - {orig_name}</p>'
+                related_html += f'<p style="color: #88ddff; margin: 4px 0;"><b>原卡：</b>ID {str(orig_id).zfill(8)} - {orig_name}</p>'
             else:
-                related_html += f'<p style="color: #ff8888; margin: 4px 0;">⚠️ 未找到 alias 對應的原卡 (ID: {alias})</p>'
+                related_html += f'<p style="color: #ff8888; margin: 4px 0;">⚠️ 未找到 alias 對應的原卡 (ID: {str(alias).zfill(8)})</p>'
 
             related_cards = []
             related_cards.append((cid, name))
@@ -2253,13 +2763,13 @@ class Viewer(QWidget):
                 related_html += '<p style="color: #88ddff; margin: 4px 0;"><b>關聯卡片清單：</b></p><ul style="color: #cccccc; margin: 2px 0; padding-left: 20px;">'
                 for rc_id, rc_name in unique_cards:
                     marker = " ⬅️ 當前" if rc_id == cid else ""
-                    related_html += f'<li>ID {rc_id} - {rc_name}{marker}</li>'
+                    related_html += f'<li>ID {str(rc_id).zfill(8)} - {rc_name}{marker}</li>'
                 related_html += '</ul>'
 
         html_content = f"""
-        <div style="line-height: 150%;">
-            <h2 style="color: #00d2ff; margin-bottom: 5px;">{title_str}</h2>
-            <p style="color: #a0a0aa; margin: 2px 0;">卡片密碼: {cid} &nbsp;&nbsp;&nbsp;&nbsp; <span style="color: #99ff99;">[環境: {env_display}]</span></p>
+        <div style="line-height: 150%; padding-top: 10px;">
+            <h2 style="margin-bottom: 5px;"><a href="copy:name" style="color: #00d2ff; text-decoration: none;">{title_str}</a></h2>
+            <p style="margin: 2px 0;"><a href="copy:code" style="color: #a0a0aa; text-decoration: none;">卡片密碼: {str(cid).zfill(8)}</a> &nbsp;&nbsp;&nbsp;&nbsp; <span style="color: #99ff99;">[環境: {env_display}]</span></p>
             <p style="color: #ffd700; margin: 2px 0; font-size: 13px;"><b>卡片種類: {type_display}</b></p>
             {attr_race_row}
             <p style="color: #ff557f; margin: 2px 0;">所屬系列: {setname_display}</p>
@@ -2268,8 +2778,9 @@ class Viewer(QWidget):
             {limit_text}
             {stat_row}
             {lv_row}
+            {ygopro_html}
             <hr style="border: 0; border-top: 1px solid #3a3a42; margin: 10px 0;">
-            <p style="color: #ffffff; white-space: pre-wrap; font-size: 12px;">{desc_str.replace('\n', '<br>')}</p>
+            <p style="font-size: 12px;"><a href="copy:desc" style="color: #ffffff; text-decoration: none; white-space: pre-wrap;">{desc_str.replace('\n', '<br>')}</a></p>
             {related_html}
         </div>
         """
