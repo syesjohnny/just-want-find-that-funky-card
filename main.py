@@ -660,14 +660,12 @@ class TriStateButton(QPushButton):
                 background-color: #004d7a;
                 color: white;
                 font-weight: bold;
-                border: 1px solid #4a4a5a;
             """)
         else:
             self.setStyleSheet("""
                 background-color: #e81123;
                 color: white;
                 font-weight: bold;
-                border: 1px solid #4a4a5a;
             """)
 
     def reset_state(self):
@@ -1402,7 +1400,7 @@ class Viewer(QWidget):
         self.lbl_columns = QLabel("每行:")
         filter_grid.addWidget(self.lbl_columns, 4, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_columns = QComboBox()
-        self.combo_columns.addItems(["1", "2", "3", "4", "5", "6", "8", "10"])
+        self.combo_columns.addItems(["1", "2", "3", "4", "5", "6"])
         self.combo_columns.setCurrentText("4")
         self.combo_columns.currentIndexChanged.connect(self.on_columns_changed)
         self.combo_columns.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
