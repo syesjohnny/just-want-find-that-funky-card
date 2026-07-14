@@ -1143,7 +1143,7 @@ class YGOPRODeckDownloader(QObject):
 class Viewer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("just wanna that funky card")
+        self.setWindowTitle("Just Wanna Find That FUNKY Card")
         self.resize(1280, 760)
         self.setMinimumSize(1045, 610)
         
@@ -1490,7 +1490,7 @@ class Viewer(QWidget):
         self.btn_wiki.setEnabled(False)
         self.btn_wiki.clicked.connect(self.open_wiki)
 
-        self.btn_qa = QPushButton("Q&A")
+        self.btn_qa = QPushButton("Konamni Database")
         self.btn_qa.setObjectName("qa_btn")
         self.btn_qa.setEnabled(False)
         self.btn_qa.clicked.connect(self.open_qa)
