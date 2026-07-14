@@ -2429,11 +2429,6 @@ class Viewer(QWidget):
         SPECIAL_PERM_TRAP  = 0x2000000000000000
         SPECIAL_RIT_MONSTER = 0x4000000000000000
         SPECIAL_RIT_MAGIC   = 0x8000000000000000
-        inc_perm_magic = SPECIAL_PERM_MAGIC in active_types_inc
-        inc_perm_trap  = SPECIAL_PERM_TRAP  in active_types_inc
-        inc_rit_monster = SPECIAL_RIT_MONSTER in active_types_inc
-        inc_rit_magic   = SPECIAL_RIT_MAGIC   in active_types_inc
-        normal_types_inc = [t for t in active_types_inc if t not in (SPECIAL_PERM_MAGIC, SPECIAL_PERM_TRAP, SPECIAL_RIT_MONSTER, SPECIAL_RIT_MAGIC)]
         exc_perm_magic = SPECIAL_PERM_MAGIC in active_types_exc
         exc_perm_trap  = SPECIAL_PERM_TRAP  in active_types_exc
         exc_rit_monster = SPECIAL_RIT_MONSTER in active_types_exc
@@ -2533,22 +2528,29 @@ class Viewer(QWidget):
             if exc_rit_magic   and (ctype & TYPE_MAGIC   and ctype & 0x80):
                 continue
 
-            link_type_checked = (TYPE_LINK in normal_types_inc)
-            other_types_inc = [t for t in normal_types_inc if t != TYPE_LINK]
-
-            if other_types_inc:
+            if active_types_inc:
+                match_results = []
+                for t in active_types_inc:
+                    if t == SPECIAL_PERM_MAGIC:
+                        match_results.append(bool(ctype & TYPE_MAGIC and ctype & 0x20000))
+                    elif t == SPECIAL_PERM_TRAP:
+                        match_results.append(bool(ctype & TYPE_TRAP and ctype & 0x20000))
+                    elif t == SPECIAL_RIT_MONSTER:
+                        match_results.append(bool(ctype & TYPE_MONSTER and ctype & 0x80))
+                    elif t == SPECIAL_RIT_MAGIC:
+                        match_results.append(bool(ctype & TYPE_MAGIC and ctype & 0x80))
+                    else:
+                        if type_inc_mode == "AND":
+                            match_results.append((ctype & t) == t)
+                        else:
+                            match_results.append(bool(ctype & t))
+                
                 if type_inc_mode == "AND":
-                    if not all((ctype & t) == t for t in other_types_inc):
+                    if not all(match_results):
                         continue
                 else:
-                    if not any(ctype & t for t in other_types_inc):
+                    if not any(match_results):
                         continue
-
-            if link_type_checked and not bool(ctype & TYPE_LINK): continue
-            if inc_perm_magic and not (ctype & TYPE_MAGIC and ctype & 0x20000): continue
-            if inc_perm_trap and not (ctype & TYPE_TRAP and ctype & 0x20000): continue
-            if inc_rit_monster and not (ctype & TYPE_MONSTER and ctype & 0x80): continue
-            if inc_rit_magic and not (ctype & TYPE_MAGIC and ctype & 0x80): continue
             if active_links:
                 if not (ctype & TYPE_LINK): continue
                 if link_mode == "AND":
