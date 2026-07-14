@@ -1,0 +1,92 @@
+First attempt failed for 64866 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=64866&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Second attempt failed for 64866 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=00064866&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Traceback (most recent call last):
+  File "c:\Users\cheny\OneDrive\Desktop\nigger editor\main.py", line 2190, in worker
+    with urllib.request.urlopen(req2, timeout=5, context=context) as response:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 493, in open
+    response = meth(req, response)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 602, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 531, in error
+    return self._call_chain(*args)
+           ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 464, in _call_chain
+    result = func(*args)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 611, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 400: Bad Request
+
+First attempt failed for 64866 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=64866&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Second attempt failed for 64866 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=00064866&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Traceback (most recent call last):
+  File "c:\Users\cheny\OneDrive\Desktop\nigger editor\main.py", line 2098, in worker
+    with urllib.request.urlopen(req2, timeout=5, context=context) as response:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 493, in open
+    response = meth(req, response)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 602, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 531, in error
+    return self._call_chain(*args)
+           ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 464, in _call_chain
+    result = func(*args)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 611, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 400: Bad Request
+
+First attempt failed for 980974 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=980974&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Second attempt failed for 980974 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=00980974&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Traceback (most recent call last):
+  File "c:\Users\cheny\OneDrive\Desktop\nigger editor\main.py", line 2160, in worker
+    with urllib.request.urlopen(req2, timeout=5, context=context) as response:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 493, in open
+    response = meth(req, response)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 602, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 531, in error
+    return self._call_chain(*args)
+           ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 464, in _call_chain
+    result = func(*args)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 611, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 400: Bad Request
+
+First attempt failed for 6218705 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=6218705&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Second attempt failed for 6218705 (url: https://db.ygoprodeck.com/api/v7/cardinfo.php?id=06218705&misc=yes&format=genesys%20ocg): HTTP Error 400: Bad Request
+Traceback (most recent call last):
+  File "c:\Users\cheny\OneDrive\Desktop\nigger editor\main.py", line 2263, in worker
+    with urllib.request.urlopen(req2, timeout=5, context=context) as response:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 493, in open
+    response = meth(req, response)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 602, in http_response
+    response = self.parent.error(
+        'http', request, response, code, msg, hdrs)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 531, in error
+    return self._call_chain(*args)
+           ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 464, in _call_chain
+    result = func(*args)
+  File "C:\Users\cheny\AppData\Local\Programs\Python\Python314\Lib\urllib\request.py", line 611, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 400: Bad Request
+

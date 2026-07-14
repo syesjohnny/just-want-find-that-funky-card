@@ -97,6 +97,36 @@ def load_strings_conf():
     except Exception as e:
         print(f"讀取 strings.conf 失敗: {e}")
 
+def set_dark_title_bar(widget):
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            hwnd = int(widget.winId())
+            
+            # 1. 啟用深色模式 (DWMWA_USE_IMMERSIVE_DARK_MODE = 20 / 19)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int)
+            )
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 19, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int)
+            )
+            
+            # 2. 強制設定標題列背景顏色為極深灰黑色 #0f0f11 (BGR: 0x00110f0f)
+            # DWMWA_CAPTION_COLOR = 35
+            color_bg = ctypes.c_int(0x00110f0f)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 35, ctypes.byref(color_bg), ctypes.sizeof(color_bg)
+            )
+            
+            # 3. 強制設定標題列文字顏色為白色 (BGR: 0x00ffffff)
+            # DWMWA_TEXT_COLOR = 36
+            color_text = ctypes.c_int(0x00ffffff)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 36, ctypes.byref(color_text), ctypes.sizeof(color_text)
+            )
+        except Exception as e:
+            print(f"Set dark title bar failed for {widget}: {e}")
+
 # 限制表
 class LFLIST:
     def __init__(self):
@@ -408,8 +438,8 @@ QPushButton#link_btn:checked { background-color: #004d7a; }
 QPushButton:disabled { background-color: #1e1e24; color: #55555d; border: 1px solid #33333d; }
 QPushButton#fav_btn { background-color: #2d2d3a; border: 1px solid #888; min-width: 90px; }
 QPushButton#fav_btn:checked { background-color: #ffaa00; color: #000; }
-QPushButton#wiki_btn, QPushButton#qa_btn, QPushButton#detail_btn { background-color: #2d2d3a; border: 1px solid #888; min-width: 90px; }
-QPushButton#wiki_btn:hover, QPushButton#qa_btn:hover, QPushButton#detail_btn:hover { background-color: #3d3d4a; }
+QPushButton#wiki_btn, QPushButton#qa_btn, QPushButton#detail_btn, QPushButton#script_btn, QPushButton#pics_btn { background-color: #2d2d3a; border: 1px solid #888; min-width: 90px; }
+QPushButton#wiki_btn:hover, QPushButton#qa_btn:hover, QPushButton#detail_btn:hover, QPushButton#script_btn:hover, QPushButton#pics_btn:hover { background-color: #3d3d4a; }
 QPushButton#folder_btn { background-color: #2d2d3a; border: 1px solid #666; min-width: 24px; max-width: 24px; }
 QPushButton#folder_btn:hover { background-color: #4a4a5a; }
 QScrollBar:vertical { background-color: #141419; width: 10px; margin: 0; border: none; }
@@ -647,6 +677,102 @@ class TriStateButton(QPushButton):
     def get_state(self):
         return self.state
 
+# ========================= 切換按鈕 =========================
+class SwitchButton(QWidget):
+    toggled = Signal(bool) # Emits state changed (False: AND, True: OR)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(140, 26)
+        self._checked = False  # False: AND (left), True: OR (right)
+        
+        # 動畫用的 offset (0.0 to 1.0)
+        self._thumb_position = 0.0 if not self._checked else 1.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._animate)
+        
+        self.setCursor(Qt.PointingHandCursor)
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, checked):
+        if self._checked != checked:
+            self._checked = checked
+            self._timer.start()
+            self.toggled.emit(self._checked)
+            self.update()
+
+    def currentText(self):
+        return "OR" if self._checked else "AND"
+
+    def setCurrentText(self, text):
+        self.setChecked(text == "OR")
+
+    def setCurrentIndex(self, index):
+        # 0 is OR (True), 1 is AND (False)
+        self.setChecked(index == 0)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setChecked(not self._checked)
+            
+    def _animate(self):
+        target = 1.0 if self._checked else 0.0
+        step = 0.15
+        if abs(self._thumb_position - target) < step:
+            self._thumb_position = target
+            self._timer.stop()
+        else:
+            if self._thumb_position < target:
+                self._thumb_position += step
+            else:
+                self._thumb_position -= step
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        font = QFont("Microsoft JhengHei", 10, QFont.Bold)
+        painter.setFont(font)
+        
+        # 1. 繪製左側 AND 文字
+        if not self._checked:
+            painter.setPen(QColor("#00d2ff"))
+        else:
+            painter.setPen(QColor("#55555d"))
+        painter.drawText(QRect(0, 0, 40, 26), Qt.AlignCenter, "AND")
+        
+        # 2. 繪製右側 OR 文字
+        if self._checked:
+            painter.setPen(QColor("#0088ff"))
+        else:
+            painter.setPen(QColor("#55555d"))
+        painter.drawText(QRect(100, 0, 40, 26), Qt.AlignCenter, "OR")
+        
+        # 3. 繪製中間的滑動槽 (track)
+        track_rect = QRect(42, 4, 56, 18)
+        painter.setPen(QPen(QColor("#4a4a5a"), 1))
+        painter.setBrush(QBrush(QColor("#1e1e24")))
+        painter.drawRoundedRect(track_rect, 9, 9)
+        
+        # 4. 繪製滑動鈕 (thumb)
+        x_offset = int(self._thumb_position * 36)
+        thumb_x = 44 + x_offset
+        
+        if not self._checked:
+            thumb_color = QColor("#00d2ff")
+        else:
+            thumb_color = QColor("#0088ff")
+            
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(thumb_color))
+        painter.drawEllipse(thumb_x, 6, 14, 14)
+        
+        painter.end()
+
 # ========================= Model / Delegate =========================
 class DetailCardModel(QAbstractListModel):
     def __init__(self, parent=None):
@@ -818,6 +944,7 @@ class CardDetailDialog(QDialog):
         self.setWindowTitle(f"卡片詳細數據 - {card_info.get('name', '')}")
         self.resize(600, 500)
         self._build_ui(card_info)
+        set_dark_title_bar(self)
 
     def _build_ui(self, card_info):
         layout = QVBoxLayout(self)
@@ -859,6 +986,7 @@ class ConstantDialog(QDialog):
         self._apply_timer.setInterval(50)
         self._apply_timer.timeout.connect(self._do_apply)
         self._build_ui()
+        set_dark_title_bar(self)
 
     def _do_apply(self):
         """timer timeout 後才呼叫 apply_filter，避免在 signal handler 裡操作 Qt"""
@@ -1017,9 +1145,13 @@ class YGOPRODeckDownloader(QObject):
 class Viewer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("查卡")
+        self.setWindowTitle("just wanna that funky card")
         self.resize(1280, 760)
         self.setMinimumSize(1045, 610)
+        
+        icon_path = os.path.join(os.path.dirname(__file__), "app.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # 生成扁平下拉箭頭圖示
         arrow_path = os.path.join(os.path.dirname(__file__), "down_arrow.png")
@@ -1103,34 +1235,7 @@ class Viewer(QWidget):
         self.set_dark_title_bar()
 
     def set_dark_title_bar(self):
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                hwnd = int(self.winId())
-                
-                # 1. 啟用深色模式 (DWMWA_USE_IMMERSIVE_DARK_MODE = 20 / 19)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 20, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int)
-                )
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 19, ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int)
-                )
-                
-                # 2. 強制設定標題列背景顏色為極深灰黑色 #0f0f11 (BGR: 0x00110f0f)
-                # DWMWA_CAPTION_COLOR = 35
-                color_bg = ctypes.c_int(0x00110f0f)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 35, ctypes.byref(color_bg), ctypes.sizeof(color_bg)
-                )
-                
-                # 3. 強制設定標題列文字顏色為白色 (BGR: 0x00ffffff)
-                # DWMWA_TEXT_COLOR = 36
-                color_text = ctypes.c_int(0x00ffffff)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 36, ctypes.byref(color_text), ctypes.sizeof(color_text)
-                )
-            except Exception as e:
-                print(f"Set dark title bar failed: {e}")
+        set_dark_title_bar(self)
 
     def _load_constants(self):
         path = os.path.join(os.path.dirname(__file__), "script", "constant.lua")
@@ -1213,11 +1318,9 @@ class Viewer(QWidget):
         # ==================== Row 0 ====================
         filter_grid.addWidget(QLabel("模式:"), 0, 0, Qt.AlignRight | Qt.AlignVCenter)
 
-        self.combo_keyword_mode = QComboBox()
-        self.combo_keyword_mode.addItems(["AND", "OR"])
-        self.combo_keyword_mode.currentIndexChanged.connect(self.apply_filter)
-        self.combo_keyword_mode.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        filter_grid.addWidget(self.combo_keyword_mode, 0, 1)
+        self.combo_keyword_mode = SwitchButton()
+        self.combo_keyword_mode.toggled.connect(self.apply_filter)
+        filter_grid.addWidget(self.combo_keyword_mode, 0, 1, Qt.AlignLeft | Qt.AlignVCenter)
 
         filter_grid.addWidget(QLabel("範圍:"), 0, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.combo_search_scope = QComboBox()
@@ -1359,7 +1462,11 @@ class Viewer(QWidget):
         scroll.setWidget(center_widget)
 
         # 右側資訊面板
-        right_panel = QVBoxLayout()
+        self.right_widget = QWidget()
+        self.right_widget.setEnabled(False)  # 在點選卡片前不能動
+        right_panel = QVBoxLayout(self.right_widget)
+        right_panel.setContentsMargins(0, 0, 0, 0)
+        right_panel.setSpacing(15)
         self.info = QTextBrowser()
         self.info.setReadOnly(True)
         self.info.setFont(QFont("Microsoft JhengHei", 11))
@@ -1377,10 +1484,12 @@ class Viewer(QWidget):
         self.btn_fav = QPushButton("收藏")
         self.btn_fav.setObjectName("fav_btn")
         self.btn_fav.setCheckable(True)
+        self.btn_fav.setEnabled(False)
         self.btn_fav.clicked.connect(self.toggle_favorite)
 
         self.btn_wiki = QPushButton("Yugipedia")
         self.btn_wiki.setObjectName("wiki_btn")
+        self.btn_wiki.setEnabled(False)
         self.btn_wiki.clicked.connect(self.open_wiki)
 
         self.btn_qa = QPushButton("Q&A")
@@ -1393,6 +1502,16 @@ class Viewer(QWidget):
         self.btn_detail.setEnabled(False)
         self.btn_detail.clicked.connect(self.show_ygoprodeck_detail)
 
+        self.btn_open_script = QPushButton("打開 script")
+        self.btn_open_script.setObjectName("script_btn")
+        self.btn_open_script.setEnabled(False)
+        self.btn_open_script.clicked.connect(self.open_card_script)
+
+        self.btn_open_pics = QPushButton("打開 pics")
+        self.btn_open_pics.setObjectName("pics_btn")
+        self.btn_open_pics.setEnabled(False)
+        self.btn_open_pics.clicked.connect(self.open_card_pic)
+
         btn_layout = QVBoxLayout()
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(10)
@@ -1401,6 +1520,8 @@ class Viewer(QWidget):
         btn_layout.addWidget(self.btn_wiki, alignment=Qt.AlignCenter)
         btn_layout.addWidget(self.btn_qa, alignment=Qt.AlignCenter)
         btn_layout.addWidget(self.btn_detail, alignment=Qt.AlignCenter)
+        btn_layout.addWidget(self.btn_open_script, alignment=Qt.AlignCenter)
+        btn_layout.addWidget(self.btn_open_pics, alignment=Qt.AlignCenter)
         btn_layout.addStretch()
 
         bottom_layout = QHBoxLayout()
@@ -1415,7 +1536,7 @@ class Viewer(QWidget):
 
         main_layout.addLayout(left_panel, 4)
         main_layout.addWidget(scroll, 4)
-        main_layout.addLayout(right_panel, 4)
+        main_layout.addWidget(self.right_widget, 4)
 
         self.search.textChanged.connect(self.apply_filter)
         self.entry_atk.textChanged.connect(self.apply_filter)
@@ -1433,6 +1554,8 @@ class Viewer(QWidget):
         self.apply_filter()
 
     def clear_all_filters(self):
+        self._current_cid = None
+        self.show_card(-1)
         self.search.blockSignals(True)
         self.entry_atk.blockSignals(True)
         self.entry_def.blockSignals(True)
@@ -1449,8 +1572,12 @@ class Viewer(QWidget):
         self.chk_lua_change_code.setChecked(False)
         self.chk_lua_contact_fusion.setChecked(False)
         self.chk_lua_win.setChecked(False)
-        self.combo_keyword_mode.setCurrentIndex(0)
-        self.combo_special_mode.setCurrentIndex(0)
+        self.combo_keyword_mode.setCurrentText("AND")
+        self.combo_special_mode.setCurrentText("OR")
+        self.combo_type_mode.setCurrentText("AND")
+        self.combo_setname_mode.setCurrentText("OR")
+        self.combo_category_mode.setCurrentText("OR")
+        self.combo_link_mode.setCurrentText("OR")
         self.combo_search_scope.setCurrentIndex(0)
         self.constant_buttons_state.clear()
         if self.constant_dialog:
@@ -1547,9 +1674,8 @@ class Viewer(QWidget):
         type_inc_lay = QVBoxLayout()
         type_inc_top = QHBoxLayout()
         type_inc_top.addWidget(QLabel("類型"))
-        self.combo_type_mode = QComboBox()
-        self.combo_type_mode.addItems(["AND", "OR"])
-        self.combo_type_mode.currentIndexChanged.connect(self.apply_filter)
+        self.combo_type_mode = SwitchButton()
+        self.combo_type_mode.toggled.connect(self.apply_filter)
         type_inc_top.addWidget(self.combo_type_mode)
         btn_x_type = QPushButton("X")
         btn_x_type.setObjectName("reset_btn")
@@ -1575,9 +1701,9 @@ class Viewer(QWidget):
         setname_lay = QVBoxLayout()
         setname_top = QHBoxLayout()
         setname_top.addWidget(QLabel("系列"))
-        self.combo_setname_mode = QComboBox()
-        self.combo_setname_mode.addItems(["OR", "AND"])
-        self.combo_setname_mode.currentIndexChanged.connect(self.apply_filter)
+        self.combo_setname_mode = SwitchButton()
+        self.combo_setname_mode.setChecked(True) # Default to OR
+        self.combo_setname_mode.toggled.connect(self.apply_filter)
         setname_top.addWidget(self.combo_setname_mode)
         btn_x_setname = QPushButton("X")
         btn_x_setname.setObjectName("reset_btn")
@@ -1616,9 +1742,9 @@ class Viewer(QWidget):
         category_lay = QVBoxLayout()
         category_top = QHBoxLayout()
         category_top.addWidget(QLabel("效果分類"))
-        self.combo_category_mode = QComboBox()
-        self.combo_category_mode.addItems(["OR", "AND"])
-        self.combo_category_mode.currentIndexChanged.connect(self.apply_filter)
+        self.combo_category_mode = SwitchButton()
+        self.combo_category_mode.setChecked(True) # Default to OR
+        self.combo_category_mode.toggled.connect(self.apply_filter)
         category_top.addWidget(self.combo_category_mode)
         btn_x_category = QPushButton("X")
         btn_x_category.setObjectName("reset_btn")
@@ -1681,9 +1807,9 @@ class Viewer(QWidget):
         link_lay = QVBoxLayout()
         link_top = QHBoxLayout()
         link_top.addWidget(QLabel("連結箭頭"))
-        self.combo_link_mode = QComboBox()
-        self.combo_link_mode.addItems(["OR", "AND"])
-        self.combo_link_mode.currentIndexChanged.connect(self.apply_filter)
+        self.combo_link_mode = SwitchButton()
+        self.combo_link_mode.setChecked(True) # Default to OR
+        self.combo_link_mode.toggled.connect(self.apply_filter)
         link_top.addWidget(self.combo_link_mode)
         btn_x_link = QPushButton("X")
         btn_x_link.setObjectName("reset_btn")
@@ -1743,9 +1869,9 @@ class Viewer(QWidget):
 
         special_mode_layout = QHBoxLayout()
         special_mode_layout.addWidget(QLabel("特殊條件模式:"))
-        self.combo_special_mode = QComboBox()
-        self.combo_special_mode.addItems(["OR", "AND"])
-        self.combo_special_mode.currentIndexChanged.connect(self.apply_filter)
+        self.combo_special_mode = SwitchButton()
+        self.combo_special_mode.setChecked(True) # Default to OR
+        self.combo_special_mode.toggled.connect(self.apply_filter)
         special_mode_layout.addWidget(self.combo_special_mode)
         special_mode_layout.addStretch()
         special_layout.addLayout(special_mode_layout)
@@ -1941,21 +2067,44 @@ class Viewer(QWidget):
                 self.btn_fav.setText("取消收藏" if is_fav else "收藏")
 
     def add_folder(self):
-        name, ok = QInputDialog.getText(self, "新增收藏夾", "請輸入新收藏夾名稱:")
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("新增收藏夾")
+        dialog.setLabelText("請輸入新收藏夾名稱:")
+        dialog.setInputMode(QInputDialog.TextInput)
+        set_dark_title_bar(dialog)
+        ok = dialog.exec()
+        name = dialog.textValue()
         if ok and name.strip():
             if self.fav_mgr.add_folder(name.strip()):
                 self.combo_folder.addItem(name.strip())
                 self.combo_folder.setCurrentText(name.strip())
             else:
-                QMessageBox.warning(self, "錯誤", "收藏夾名稱已存在或無效")
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("錯誤")
+                msg.setText("收藏夾名稱已存在或無效")
+                msg.setStandardButtons(QMessageBox.Ok)
+                set_dark_title_bar(msg)
+                msg.exec()
 
     def del_folder(self):
         current = self.combo_folder.currentText()
         if current == "預設":
-            QMessageBox.information(self, "提示", "預設收藏夾不可刪除")
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("提示")
+            msg.setText("預設收藏夾不可刪除")
+            msg.setStandardButtons(QMessageBox.Ok)
+            set_dark_title_bar(msg)
+            msg.exec()
             return
-        reply = QMessageBox.question(self, "確認刪除", f"確定要刪除收藏夾「{current}」嗎？\n其內收藏將遺失。",
-                                     QMessageBox.Yes | QMessageBox.No)
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("確認刪除")
+        msg.setText(f"確定要刪除收藏夾「{current}」嗎？\n其內收藏將遺失。")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        set_dark_title_bar(msg)
+        reply = msg.exec()
         if reply == QMessageBox.Yes:
             if self.fav_mgr.remove_folder(current):
                 self.combo_folder.removeItem(self.combo_folder.currentIndex())
@@ -2022,6 +2171,54 @@ class Viewer(QWidget):
         if isinstance(ygopro_data, dict):
             dialog = CardDetailDialog(self, ygopro_data)
             dialog.exec()
+
+    def open_card_script(self):
+        if self._current_cid is None:
+            return
+        script_path = os.path.join(os.path.dirname(__file__), "script", f"c{self._current_cid}.lua")
+        if os.path.exists(script_path):
+            try:
+                os.startfile(script_path)
+            except Exception as e:
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("錯誤")
+                msg.setText(f"無法打開腳本檔案: {e}")
+                msg.setStandardButtons(QMessageBox.Ok)
+                set_dark_title_bar(msg)
+                msg.exec()
+        else:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("提示")
+            msg.setText(f"找不到該卡片的腳本檔案:\n{script_path}")
+            msg.setStandardButtons(QMessageBox.Ok)
+            set_dark_title_bar(msg)
+            msg.exec()
+
+    def open_card_pic(self):
+        if self._current_cid is None:
+            return
+        pic_path = os.path.join(os.path.dirname(__file__), "pics", f"{self._current_cid}.jpg")
+        if os.path.exists(pic_path):
+            try:
+                os.startfile(pic_path)
+            except Exception as e:
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("錯誤")
+                msg.setText(f"無法打開圖片檔案: {e}")
+                msg.setStandardButtons(QMessageBox.Ok)
+                set_dark_title_bar(msg)
+                msg.exec()
+        else:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("提示")
+            msg.setText(f"找不到該卡片的圖片檔案:\n{pic_path}")
+            msg.setStandardButtons(QMessageBox.Ok)
+            set_dark_title_bar(msg)
+            msg.exec()
 
     def fetch_ygoprodeck_info(self, cid):
         def worker():
@@ -2174,11 +2371,7 @@ class Viewer(QWidget):
             idx = current.row()
             self.show_card(idx)
         else:
-            self.info.clear()
-            self.lbl_image.setText("無圖片")
-            self.btn_fav.setChecked(False)
-            self.btn_fav.setText("收藏")
-            self._current_cid = None
+            self.show_card(-1)
 
     def _get_lua_file_content(self, cid):
         if cid in self.lua_file_cache:
@@ -2245,6 +2438,10 @@ class Viewer(QWidget):
         self.filtered = []
         self.thumbnail_timer.stop()    # 必須在 list.clear() 之前停，否則可能跑到已刪除的 item
         self.thumbnail_queue.clear()
+        self.list.blockSignals(True)
+        detail_sel_model = self.detail_view.selectionModel()
+        if detail_sel_model:
+            detail_sel_model.blockSignals(True)
         self.list.clear()
 
         type_inc_mode = self.combo_type_mode.currentText()
@@ -2265,7 +2462,7 @@ class Viewer(QWidget):
         if self.chk_lua_win.isChecked():
             special_conditions_check.append("🏆 特殊勝利條件")
 
-        special_mode = self.combo_special_mode.currentText() if special_conditions_check else "OR"
+        special_mode = self.combo_special_mode.currentText()
 
         # 收集勾選的常數名稱 (只用名稱比對，並利用完整單詞匹配)
         active_constant_names = [name for name, checked in self.constant_buttons_state.items() if checked]
@@ -2456,11 +2653,21 @@ class Viewer(QWidget):
         reverse_sort = "（降）" in sort_mode or "(降)" in sort_mode
         self.filtered.sort(key=sort_key, reverse=reverse_sort)
 
+        # 找出之前的卡片是否在新的篩選列表中
+        target_idx = -1
+        if self._current_cid is not None:
+            for idx, c in enumerate(self.filtered):
+                if c[0] == self._current_cid:
+                    target_idx = idx
+                    break
+
         if display_mode == "縮圖模式":
             self.stack.setCurrentIndex(0)
             self.list.setViewMode(QListWidget.IconMode)
             self.list.setSpacing(8)
             self.update_list_grid()
+            
+            self.list.blockSignals(True)
             for c in self.filtered:
                 cid, name, desc, ctype, atk, df, level, race, attr, setcode, alias, ot, category = c
                 item = QListWidgetItem(name)
@@ -2474,11 +2681,36 @@ class Viewer(QWidget):
                     item.setIcon(default_icon)
                     self.thumbnail_queue.append((item, cid))
                 self.list.addItem(item)
+            
+            if target_idx != -1:
+                self.list.setCurrentRow(target_idx)
+            self.list.blockSignals(False)
+            
         else:
             self.stack.setCurrentIndex(1)
+            detail_sel_model = self.detail_view.selectionModel()
+            if detail_sel_model:
+                detail_sel_model.blockSignals(True)
+                
             self.detail_model.set_cards(self.filtered)
             self.detail_model.set_lflist_info(self.lflist, self.current_lf_label)
             self.detail_view.clearSelection()
+            
+            if target_idx != -1:
+                idx_model = self.detail_model.index(target_idx)
+                self.detail_view.setCurrentIndex(idx_model)
+                
+            if detail_sel_model:
+                detail_sel_model.blockSignals(False)
+
+        # 確保在結束時解鎖訊號
+        self.list.blockSignals(False)
+        detail_sel_model = self.detail_view.selectionModel()
+        if detail_sel_model:
+            detail_sel_model.blockSignals(False)
+
+        if target_idx != -1:
+            self.show_card(target_idx)
 
         self.lbl_count.setText(f"篩選出 : {len(self.filtered)} / 全庫 : {len(self.cards)} 筆")
         self._filter_running = False
@@ -2520,23 +2752,27 @@ class Viewer(QWidget):
         return features
 
     def show_card(self, idx):
-        display_mode = self.combo_display_mode.currentText()
-        if display_mode == "詳細模式":
-            if idx < 0 or idx >= len(self.filtered):
-                self.info.clear()
-                self.lbl_image.setText("無圖片")
-                self.btn_fav.setChecked(False)
-                self.btn_fav.setText("收藏")
-                self._current_cid = None
-                return
-            c = self.filtered[idx]
-        else:
-            if idx < 0 or idx >= len(self.filtered):
-                return
-            c = self.filtered[idx]
+        if idx < 0 or idx >= len(self.filtered):
+            self.right_widget.setEnabled(False)
+            self.info.clear()
+            self.lbl_image.setText("無圖片")
+            self.btn_fav.setChecked(False)
+            self.btn_fav.setText("收藏")
+            self.btn_fav.setEnabled(False)
+            self.btn_wiki.setEnabled(False)
+            self._current_cid = None
+            self.btn_open_script.setEnabled(False)
+            self.btn_open_pics.setEnabled(False)
+            return
 
+        self.right_widget.setEnabled(True)
+        c = self.filtered[idx]
         cid, name, desc, ctype, atk, df, level, race, attr, setcode, alias, ot, category = c
         self._current_cid = cid
+        self.btn_fav.setEnabled(True)
+        self.btn_wiki.setEnabled(True)
+        self.btn_open_script.setEnabled(True)
+        self.btn_open_pics.setEnabled(True)
 
         # YGOPRODeck API 數據加載邏輯
         ygopro_data = self.ygoprodeck_cache.get(cid)
@@ -2789,6 +3025,9 @@ class Viewer(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    icon_path = os.path.join(os.path.dirname(__file__), "app.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     w = Viewer()
     w.show()
     sys.exit(app.exec())
