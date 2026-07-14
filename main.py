@@ -6,7 +6,8 @@ import json
 import faulthandler
 import traceback
 import threading
-faulthandler.enable()  # 當機除錯
+if sys.stderr is not None:
+    faulthandler.enable()  # 當機除錯
 import time
 
 
@@ -74,11 +75,17 @@ CATEGORY_MAP = {
     0x40000000: "超量相關",0x80000000: "效果無效",
 }
 
+# 路徑設定 (PyInstaller 支援)
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(__file__)
+
 # 字段
 def load_strings_conf():
     global SETNAME_MAP
     SETNAME_MAP.clear()
-    conf_path = os.path.join(os.path.dirname(__file__), "strings.conf")
+    conf_path = os.path.join(BASE_DIR, "strings.conf")
     if not os.path.exists(conf_path):
         return
     pattern = re.compile(r"^!setname\s+(0x[0-9a-fA-F]+)\s+(.+)$")
@@ -135,7 +142,7 @@ class LFLIST:
         self._load()
 
     def _load(self):
-        path = os.path.join(os.path.dirname(__file__), "lflist.conf")
+        path = os.path.join(BASE_DIR, "lflist.conf")
         if not os.path.exists(path):
             return
         current_labels = []
@@ -184,8 +191,8 @@ class LFLIST:
 # Lua 索引快取管理器
 class LuaCacheManager:
     def __init__(self):
-        self.script_dir = os.path.join(os.path.dirname(__file__), "script")
-        self.cache_path = os.path.join(os.path.dirname(__file__), "lua_cache_v2.json")
+        self.script_dir = os.path.join(BASE_DIR, "script")
+        self.cache_path = os.path.join(BASE_DIR, "lua_cache_v2.json")
         self.card_data = {}
         self.last_updated = 0.0
         self.inverted_index = {}
@@ -344,7 +351,7 @@ class LuaCacheManager:
 class FavoritesManager:
 
     def __init__(self):
-        self._path = os.path.join(os.path.dirname(__file__), "favorites.json")
+        self._path = os.path.join(BASE_DIR, "favorites.json")
         self._data = {}
         self._current = "預設"
         self.load()
@@ -926,7 +933,7 @@ class DetailCardDelegate(QStyledItemDelegate):
     def _get_pixmap(self, cid):
         if cid in self._pixmap_cache:
             return self._pixmap_cache[cid]
-        img_path = os.path.join(os.path.dirname(__file__), "pics", f"{cid}.jpg")
+        img_path = os.path.join(BASE_DIR, "pics", f"{cid}.jpg")
         if os.path.exists(img_path):
             pixmap = QPixmap(img_path).scaled(self.IMG_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
@@ -1147,12 +1154,12 @@ class Viewer(QWidget):
         self.resize(1280, 760)
         self.setMinimumSize(1045, 610)
         
-        icon_path = os.path.join(os.path.dirname(__file__), "app.ico")
+        icon_path = os.path.join(BASE_DIR, "app.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
         # 生成扁平下拉箭頭圖示
-        arrow_path = os.path.join(os.path.dirname(__file__), "down_arrow.png")
+        arrow_path = os.path.join(BASE_DIR, "down_arrow.png")
         if not os.path.exists(arrow_path):
             try:
                 pixmap = QPixmap(16, 16)
@@ -1236,7 +1243,7 @@ class Viewer(QWidget):
         set_dark_title_bar(self)
 
     def _load_constants(self):
-        path = os.path.join(os.path.dirname(__file__), "script", "constant.lua")
+        path = os.path.join(BASE_DIR, "script", "constant.lua")
         if not os.path.exists(path):
             return
         groups = []
@@ -1490,7 +1497,7 @@ class Viewer(QWidget):
         self.btn_wiki.setEnabled(False)
         self.btn_wiki.clicked.connect(self.open_wiki)
 
-        self.btn_qa = QPushButton("Konamni Database")
+        self.btn_qa = QPushButton("Konami Database")
         self.btn_qa.setObjectName("qa_btn")
         self.btn_qa.setEnabled(False)
         self.btn_qa.clicked.connect(self.open_qa)
@@ -1904,7 +1911,7 @@ class Viewer(QWidget):
         self.constant_dialog.raise_()
 
     def auto_load_default_db(self):
-        default_path = os.path.join(os.path.dirname(__file__), "cards.cdb")
+        default_path = os.path.join(BASE_DIR, "cards.cdb")
         if os.path.exists(default_path):
             self.load_database_by_path(default_path)
 
@@ -1998,7 +2005,7 @@ class Viewer(QWidget):
             cache_key = (cid, cache_key_suffix)
             icon = self.thumbnail_cache.get(cache_key)
             if icon is None:
-                img_path = os.path.join(os.path.dirname(__file__), "pics", f"{cid}.jpg")
+                img_path = os.path.join(BASE_DIR, "pics", f"{cid}.jpg")
                 icon_size = self.list.iconSize()
                 if icon_size.width() <= 0:
                     icon_size = QSize(120, 160)
@@ -2173,7 +2180,7 @@ class Viewer(QWidget):
     def open_card_script(self):
         if self._current_cid is None:
             return
-        script_path = os.path.join(os.path.dirname(__file__), "script", f"c{self._current_cid}.lua")
+        script_path = os.path.join(BASE_DIR, "script", f"c{self._current_cid}.lua")
         if os.path.exists(script_path):
             try:
                 os.startfile(script_path)
@@ -2197,7 +2204,7 @@ class Viewer(QWidget):
     def open_card_pic(self):
         if self._current_cid is None:
             return
-        pic_path = os.path.join(os.path.dirname(__file__), "pics", f"{self._current_cid}.jpg")
+        pic_path = os.path.join(BASE_DIR, "pics", f"{self._current_cid}.jpg")
         if os.path.exists(pic_path):
             try:
                 os.startfile(pic_path)
@@ -2374,7 +2381,7 @@ class Viewer(QWidget):
     def _get_lua_file_content(self, cid):
         if cid in self.lua_file_cache:
             return self.lua_file_cache[cid]
-        script_path = os.path.join(os.path.dirname(__file__), "script", f"c{cid}.lua")
+        script_path = os.path.join(BASE_DIR, "script", f"c{cid}.lua")
         if os.path.exists(script_path):
             try:
                 with open(script_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -2733,7 +2740,7 @@ class Viewer(QWidget):
             return self.lua_feature_cache[target_id]
 
         features = []
-        script_path = os.path.join(os.path.dirname(__file__), "script", f"c{target_id}.lua")
+        script_path = os.path.join(BASE_DIR, "script", f"c{target_id}.lua")
         if os.path.exists(script_path):
             try:
                 with open(script_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -2822,7 +2829,7 @@ class Viewer(QWidget):
         else:
             features_html = ""
 
-        img_path = os.path.join(os.path.dirname(__file__), "pics", f"{cid}.jpg")
+        img_path = os.path.join(BASE_DIR, "pics", f"{cid}.jpg")
         if os.path.exists(img_path):
             pixmap = QPixmap(img_path)
             pixmap = pixmap.scaled(200, 290, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -3023,7 +3030,7 @@ class Viewer(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    icon_path = os.path.join(os.path.dirname(__file__), "app.ico")
+    icon_path = os.path.join(BASE_DIR, "app.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     w = Viewer()
